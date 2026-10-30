@@ -1,0 +1,805 @@
+###############################################################################
+# C-09 - Casos de prueba C-01 a C-19 (REST Client de VS Code / JetBrains)
+###############################################################################
+# Antes de ejecutar el archivo:
+#   1. alembic upgrade head
+#   2. .\.venv\Scripts\python.exe seed.py
+#   3. uvicorn app.main:app --port 8000
+#
+# El archivo se ejecuta de arriba hacia abajo y depende del estado inicial que
+# deja `seed.py`: usuarios 1..7, clientes 1 (Laura) y 2 (Jorge), vehículos 1
+# AC456EF (Laura), 2 AB123CD (Laura) y 3 JOR123 (Jorge), repuestos 1 FIL-001,
+# 2 FRE-010, 3 BUJ-020 y 4 ACE-530, órdenes 1 (PENDIENTE, vehículo 1) y 2
+# (EN_REPARACION, vehículo 3, mecánico 4, 4 bujías).
+#
+# TODAS las peticiones usan `# @no-cookie-jar` y envían explícitamente el
+# encabezado `Cookie: {{loginX.response.headers.Set-Cookie}}`, tal como pide
+# la consigna, para poder tener varias sesiones vivas a la vez (C-07).
+# El Caso C-14 se ejecuta por separado con `test/solo_agregado.sql`; acá queda
+# documentado su resultado esperado.
+###############################################################################
+
+@host = http://localhost:8000
+@password = Secreto123!
+# Usuarios del seed (ids deterministas)
+@adminId = 1
+@admin2Id = 2
+@recepcionId = 3
+@mecanicoId = 4
+@mecanico2Id = 5
+@clienteId = 6
+@nuevoId = 7
+# Clientes y vehículos del seed
+@lauraId = 1
+@jorgeId = 2
+@vehiculoLaura1 = 1
+@vehiculoLaura2 = 2
+@vehiculoJorge = 3
+# Repuestos del seed
+@filtroId = 1
+@frenoId = 2
+@bujiaId = 3
+@aceiteId = 4
+# Órdenes del seed
+@orden1Id = 1
+@orden2Id = 2
+
+###############################################################################
+# 0. SESIONES PARALELAS (login nombrado + @no-cookie-jar + Cookie explícita)
+###############################################################################
+
+### 0.1 Sesión del administrador principal (usuario 1)
+# @name loginAdmin
+# @no-cookie-jar
+POST {{host}}/auth/login HTTP/1.1
+Content-Type: application/json
+
+{
+  "email": "admin@example.com",
+  "password": "{{password}}"
+}
+
+### 0.2 Sesión de la recepción (usuario 3)
+# @name loginRecepcion
+# @no-cookie-jar
+POST {{host}}/auth/login HTTP/1.1
+Content-Type: application/json
+
+{
+  "email": "recepcion@example.com",
+  "password": "{{password}}"
+}
+
+### 0.3 Sesión del mecánico asignado a la orden 2 (usuario 4)
+# @name loginMecanico
+# @no-cookie-jar
+POST {{host}}/auth/login HTTP/1.1
+Content-Type: application/json
+
+{
+  "email": "mecanico@example.com",
+  "password": "{{password}}"
+}
+
+### 0.4 Sesión del segundo mecánico (usuario 5), usada en C-07
+# @name loginMecanico2
+# @no-cookie-jar
+POST {{host}}/auth/login HTTP/1.1
+Content-Type: application/json
+
+{
+  "email": "mecanico2@example.com",
+  "password": "{{password}}"
+}
+
+### 0.5 Sesión de Laura (cliente, usuario 6)
+# @name loginCliente
+# @no-cookie-jar
+POST {{host}}/auth/login HTTP/1.1
+Content-Type: application/json
+
+{
+  "email": "cliente@example.com",
+  "password": "{{password}}"
+}
+
+###############################################################################
+# C-01 - Parámetro de ruta no entero con sesión iniciada
+# Esperado: 422 sin ejecutar el handler (la validación del path ocurre antes).
+###############################################################################
+
+### C-01.1 GET /clientes/abc con cookie de admin -> 422
+# @name caso01
+# @no-cookie-jar
+GET {{host}}/clientes/abc HTTP/1.1
+Cookie: {{loginAdmin.response.headers.Set-Cookie}}
+
+###############################################################################
+# C-02 - Registro; correo y documento repetidos
+# Esperado: 201; 409 con mensaje propio; el registro rechazado no deja filas.
+###############################################################################
+
+### C-02.1 Registro de una cuenta nueva -> 201 (usuario 8, cliente 3)
+# @name registroNuevo
+# @no-cookie-jar
+POST {{host}}/auth/registro HTTP/1.1
+Content-Type: application/json
+
+{
+  "email": "nueva.cuenta@example.com",
+  "nombre": "Nueva Cuenta",
+  "documento": "33111222",
+  "telefono": "555-0199",
+  "password": "{{password}}"
+}
+
+### C-02.2 Mismo correo con otro documento -> 409 "El correo indicado ya está registrado"
+# @name registroCorreoRepetido
+# @no-cookie-jar
+POST {{host}}/auth/registro HTTP/1.1
+Content-Type: application/json
+
+{
+  "email": "nueva.cuenta@example.com",
+  "nombre": "Otra Persona",
+  "documento": "34999888",
+  "password": "{{password}}"
+}
+
+### C-02.3 Mismo documento con otro correo -> 409 "El documento indicado ya está registrado"
+# @name registroDocumentoRepetido
+# @no-cookie-jar
+POST {{host}}/auth/registro HTTP/1.1
+Content-Type: application/json
+
+{
+  "email": "otra.cuenta@example.com",
+  "nombre": "Otra Cuenta",
+  "documento": "33111222",
+  "password": "{{password}}"
+}
+
+### C-02.4 La cuenta rechazada por documento no existe: login -> 401
+# @no-cookie-jar
+POST {{host}}/auth/login HTTP/1.1
+Content-Type: application/json
+
+{
+  "email": "otra.cuenta@example.com",
+  "password": "{{password}}"
+}
+
+# Verificación en base (sin filas sueltas):
+#   SELECT count(*) FROM usuario;           -- 8
+#   SELECT count(*) FROM cliente;           -- 3
+#   SELECT count(*) FROM asignacion_rol;    -- 8
+
+###############################################################################
+# C-03 - Cookie del login y ausencia de token
+# Esperado: Set-Cookie con HttpOnly, SameSite=Lax y Max-Age (1800); el cuerpo
+#           no trae token; sin cookie o con Authorization: Bearer -> 401.
+###############################################################################
+
+### C-03.1 El login del inicio (loginAdmin) ya es la evidencia de Set-Cookie
+# Esperado en Set-Cookie:
+#   access_token=...; HttpOnly; Max-Age=1800; Path=/; SameSite=lax
+# Cuerpo: {"mensaje":"Sesión iniciada","debe_cambiar_password":false,
+#          "expira_en_segundos":1800} (sin token)
+
+### C-03.2 Sin cookie -> 401
+# @name caso03SinCookie
+# @no-cookie-jar
+GET {{host}}/usuarios/{{adminId}}/roles HTTP/1.1
+
+### C-03.3 Sólo Authorization: Bearer (sin cookie) -> 401
+# @name caso03Bearer
+# @no-cookie-jar
+GET {{host}}/usuarios/{{adminId}}/roles HTTP/1.1
+Authorization: Bearer token-falso
+
+###############################################################################
+# C-04 - Correo existente con contraseña mala y correo inexistente
+# Esperado: 401 con el mismo cuerpo genérico y tiempo parecido.
+###############################################################################
+
+### C-04.1 Correo existente con contraseña incorrecta -> 401
+# @name caso04Mala
+# @no-cookie-jar
+POST {{host}}/auth/login HTTP/1.1
+Content-Type: application/json
+
+{
+  "email": "admin@example.com",
+  "password": "NoEsLaClave123!"
+}
+
+### C-04.2 Correo inexistente -> 401 con el mismo cuerpo
+# @name caso04Inexistente
+# @no-cookie-jar
+POST {{host}}/auth/login HTTP/1.1
+Content-Type: application/json
+
+{
+  "email": "no.existe@example.com",
+  "password": "NoEsLaClave123!"
+}
+
+# Esperado en ambos: {"detail":"Correo o contraseña incorrectos"}
+
+###############################################################################
+# C-05 - Seis intentos fallidos seguidos
+# Esperado: los cinco primeros 401; el sexto 429 con Retry-After y en pocos
+#           milisegundos. Los cinco fallos quedan en intento_acceso.
+# Se usa admin2@example.com (usuario 2), que no se necesita en otro caso.
+###############################################################################
+
+### C-05.1 Intento fallido 1 -> 401
+# @no-cookie-jar
+POST {{host}}/auth/login HTTP/1.1
+Content-Type: application/json
+
+{ "email": "admin2@example.com", "password": "Mala123!" }
+
+### C-05.2 Intento fallido 2 -> 401
+# @no-cookie-jar
+POST {{host}}/auth/login HTTP/1.1
+Content-Type: application/json
+
+{ "email": "admin2@example.com", "password": "Mala123!" }
+
+### C-05.3 Intento fallido 3 -> 401
+# @no-cookie-jar
+POST {{host}}/auth/login HTTP/1.1
+Content-Type: application/json
+
+{ "email": "admin2@example.com", "password": "Mala123!" }
+
+### C-05.4 Intento fallido 4 -> 401
+# @no-cookie-jar
+POST {{host}}/auth/login HTTP/1.1
+Content-Type: application/json
+
+{ "email": "admin2@example.com", "password": "Mala123!" }
+
+### C-05.5 Intento fallido 5 -> 401
+# @no-cookie-jar
+POST {{host}}/auth/login HTTP/1.1
+Content-Type: application/json
+
+{ "email": "admin2@example.com", "password": "Mala123!" }
+
+### C-05.6 Sexto intento -> 429 con Retry-After (no se registra el intento)
+# @name caso05Bloqueado
+# @no-cookie-jar
+POST {{host}}/auth/login HTTP/1.1
+Content-Type: application/json
+
+{ "email": "admin2@example.com", "password": "Mala123!" }
+
+# Verificación en base: 5 fallos para admin2@example.com
+#   SELECT count(*) FROM intento_acceso
+#    WHERE email = 'admin2@example.com' AND exito = false;  -- 5
+
+###############################################################################
+# C-06 - 401 contra 403, y lo propio
+# Esperado: sin sesión 401; cuenta sin rol de personal 403; el cliente ve su
+#           orden (200) y no la ajena (403).
+###############################################################################
+
+### C-06.1 Listado de órdenes sin sesión -> 401
+# @name caso06SinSesion
+# @no-cookie-jar
+GET {{host}}/ordenes HTTP/1.1
+
+### C-06.2 Listado de órdenes con el cliente (sin rol de personal) -> 403
+# @name caso06ClienteListado
+# @no-cookie-jar
+GET {{host}}/ordenes HTTP/1.1
+Cookie: {{loginCliente.response.headers.Set-Cookie}}
+
+### C-06.3 El cliente ve su propia orden 1 -> 200
+# @name caso06Propia
+# @no-cookie-jar
+GET {{host}}/ordenes/{{orden1Id}} HTTP/1.1
+Cookie: {{loginCliente.response.headers.Set-Cookie}}
+
+### C-06.4 El cliente no ve la orden 2 (de Jorge) -> 403
+# @name caso06Ajena
+# @no-cookie-jar
+GET {{host}}/ordenes/{{orden2Id}} HTTP/1.1
+Cookie: {{loginCliente.response.headers.Set-Cookie}}
+
+###############################################################################
+# C-07 - Revocar un rol con la sesión abierta; vencimientos inválidos
+# Esperado: la misma cookie pasa a 403; /auth/yo muestra roles_vigentes []
+#           frente a roles_token ["MECANICO"]; la fila revocada sigue en el
+#           historial; vencimiento pasado o sin zona horaria -> 422.
+###############################################################################
+
+### C-07.1 Antes de revocar, mecanico2 accede al listado -> 200
+# @name caso07Antes
+# @no-cookie-jar
+GET {{host}}/ordenes HTTP/1.1
+Cookie: {{loginMecanico2.response.headers.Set-Cookie}}
+
+### C-07.2 El admin revoca MECANICO del usuario 5 -> 200 con revocada_en no nulo
+# @name caso07Revocar
+# @no-cookie-jar
+DELETE {{host}}/usuarios/{{mecanico2Id}}/roles/MECANICO HTTP/1.1
+Cookie: {{loginAdmin.response.headers.Set-Cookie}}
+
+### C-07.3 La misma cookie de mecanico2 ahora recibe 403
+# @name caso07Despues
+# @no-cookie-jar
+GET {{host}}/ordenes HTTP/1.1
+Cookie: {{loginMecanico2.response.headers.Set-Cookie}}
+
+### C-07.4 /auth/yo con la misma cookie: roles_vigentes [] y roles_token ["MECANICO"]
+# @name caso07Yo
+# @no-cookie-jar
+GET {{host}}/auth/yo HTTP/1.1
+Cookie: {{loginMecanico2.response.headers.Set-Cookie}}
+
+### C-07.5 Historial de roles del usuario 5: la fila revocada sigue -> 200
+# @name caso07Historial
+# @no-cookie-jar
+GET {{host}}/usuarios/{{mecanico2Id}}/roles HTTP/1.1
+Cookie: {{loginAdmin.response.headers.Set-Cookie}}
+
+### C-07.6 Vencimiento en el pasado -> 422
+# @name caso07VencimientoPasado
+# @no-cookie-jar
+POST {{host}}/usuarios/{{mecanico2Id}}/roles HTTP/1.1
+Cookie: {{loginAdmin.response.headers.Set-Cookie}}
+Content-Type: application/json
+
+{
+  "rol": "RECEPCION",
+  "vence_en": "2020-01-01T00:00:00Z"
+}
+
+### C-07.7 Vencimiento sin zona horaria -> 422
+# @name caso07VencimientoSinZona
+# @no-cookie-jar
+POST {{host}}/usuarios/{{mecanico2Id}}/roles HTTP/1.1
+Cookie: {{loginAdmin.response.headers.Set-Cookie}}
+Content-Type: application/json
+
+{
+  "rol": "RECEPCION",
+  "vence_en": "2030-01-01T00:00:00"
+}
+
+###############################################################################
+# C-08 - Autoprotección
+# Esperado: el administrador no puede revocar su propia asignación ADMIN -> 409
+###############################################################################
+
+### C-08.1 El admin revoca su propio ADMIN -> 409
+# @name caso08
+# @no-cookie-jar
+DELETE {{host}}/usuarios/{{adminId}}/roles/ADMIN HTTP/1.1
+Cookie: {{loginAdmin.response.headers.Set-Cookie}}
+
+###############################################################################
+# C-09 - Cambio obligatorio de contraseña
+# Esperado: con la sesión de nuevo@example.com, todo /protegido -> 403 salvo
+#           /auth; luego del cambio, la cookie nueva vale y la vieja da 401.
+###############################################################################
+
+### C-09.1 Login de nuevo@example.com -> 200 con debe_cambiar_password true
+# @name loginNuevo
+# @no-cookie-jar
+POST {{host}}/auth/login HTTP/1.1
+Content-Type: application/json
+
+{
+  "email": "nuevo@example.com",
+  "password": "{{password}}"
+}
+
+### C-09.2 Ruta protegida con la cookie vieja -> 403 (cambio pendiente)
+# @name caso09Bloqueado
+# @no-cookie-jar
+GET {{host}}/ordenes HTTP/1.1
+Cookie: {{loginNuevo.response.headers.Set-Cookie}}
+
+### C-09.3 /auth/yo sí funciona con la cookie vieja -> 200
+# @name caso09Yo
+# @no-cookie-jar
+GET {{host}}/auth/yo HTTP/1.1
+Cookie: {{loginNuevo.response.headers.Set-Cookie}}
+
+### C-09.4 Cambio de contraseña -> 200 y cookie nueva
+# @name cambioPasswordNuevo
+# @no-cookie-jar
+POST {{host}}/auth/cambiar-password HTTP/1.1
+Cookie: {{loginNuevo.response.headers.Set-Cookie}}
+Content-Type: application/json
+
+{
+  "password_actual": "{{password}}",
+  "password_nueva": "NuevaClave123!"
+}
+
+### C-09.5 La cookie nueva accede al grupo protegido -> 200
+# @name caso09NuevaVale
+# @no-cookie-jar
+GET {{host}}/ordenes HTTP/1.1
+Cookie: {{cambioPasswordNuevo.response.headers.Set-Cookie}}
+
+### C-09.6 La cookie vieja ya no vale -> 401
+# @name caso09ViejaInvalida
+# @no-cookie-jar
+GET {{host}}/auth/yo HTTP/1.1
+Cookie: {{loginNuevo.response.headers.Set-Cookie}}
+
+###############################################################################
+# C-10 - Alta de una orden con dos ítems
+# Esperado: 201 con precios copiados, total 29000 e historial inicial; con un
+#           repuesto inexistente, 409 y la orden no queda creada.
+###############################################################################
+
+### C-10.1 Recepción crea orden con 2 ítems (FIL-001 x2 y ACE-530 x1)
+# Esperado: 201, total 29000.00, items con precio_unitario 8500 y 12000,
+#           historial [{desde_estado:null, hasta_estado:"PENDIENTE"}]
+# @name crearOrdenDosItems
+# @no-cookie-jar
+POST {{host}}/ordenes HTTP/1.1
+Cookie: {{loginRecepcion.response.headers.Set-Cookie}}
+Content-Type: application/json
+
+{
+  "vehiculo_id": {{vehiculoLaura2}},
+  "falla": "Revisión general y cambio de aceite",
+  "items": [
+    { "repuesto_id": {{filtroId}}, "cantidad": 2 },
+    { "repuesto_id": {{aceiteId}}, "cantidad": 1 }
+  ]
+}
+
+### C-10.2 Orden con un repuesto inexistente (id 999) -> 409
+# @name caso10RepuestoInexistente
+# @no-cookie-jar
+POST {{host}}/ordenes HTTP/1.1
+Cookie: {{loginRecepcion.response.headers.Set-Cookie}}
+Content-Type: application/json
+
+{
+  "vehiculo_id": {{vehiculoLaura2}},
+  "falla": "Ítem inválido",
+  "items": [
+    { "repuesto_id": 999, "cantidad": 1 }
+  ]
+}
+
+### C-10.3 El intento rechazado no creó una orden -> total 3 (órdenes 1, 2 y la de C-10.1)
+# @name caso10Listado
+# @no-cookie-jar
+GET {{host}}/ordenes?size=100 HTTP/1.1
+Cookie: {{loginAdmin.response.headers.Set-Cookie}}
+
+###############################################################################
+# C-11 - Terminar la orden 2, que pide más bujías que las que hay
+# Esperado: 409 y estado, stock, movimientos e historial intactos.
+###############################################################################
+
+### C-11.1 El mecánico asignado intenta terminar la orden 2 -> 409 (stock 2 < 4)
+# @name caso11Stock
+# @no-cookie-jar
+POST {{host}}/ordenes/{{orden2Id}}/terminar HTTP/1.1
+Cookie: {{loginMecanico.response.headers.Set-Cookie}}
+
+### C-11.2 La orden 2 sigue EN_REPARACION -> 200
+# @name caso11Estado
+# @no-cookie-jar
+GET {{host}}/ordenes/{{orden2Id}} HTTP/1.1
+Cookie: {{loginAdmin.response.headers.Set-Cookie}}
+
+### C-11.3 El stock de BUJ-020 sigue en 2
+# El API no expone GET /repuestos/{id}: se consulta el listado filtrado por código.
+# @name caso11StockRepuesto
+# @no-cookie-jar
+GET {{host}}/repuestos?q=buj&size=10 HTTP/1.1
+Cookie: {{loginAdmin.response.headers.Set-Cookie}}
+
+### C-11.4 Movimientos de BUJ-020: sólo el "Stock inicial" -> 1
+# @name caso11Movimientos
+# @no-cookie-jar
+GET {{host}}/repuestos/{{bujiaId}}/movimientos HTTP/1.1
+Cookie: {{loginAdmin.response.headers.Set-Cookie}}
+
+# Historial de la orden 2: 2 líneas (alta e inicio de reparación), visible en la
+# respuesta de C-11.2. El seed crea exactamente esas dos líneas.
+
+###############################################################################
+# C-12 - Reponer y terminar la orden 2
+# Esperado: 200; baja el stock a 2, aparece el movimiento de consumo y la línea
+#           de historial; el aviso sale en el registro después de la respuesta.
+###############################################################################
+
+### C-12.1 El admin repone 4 bujías -> 200, stock 6
+# @name caso12Reponer
+# @no-cookie-jar
+POST {{host}}/repuestos/{{bujiaId}}/reponer HTTP/1.1
+Cookie: {{loginAdmin.response.headers.Set-Cookie}}
+Content-Type: application/json
+
+{ "cantidad": 4 }
+
+### C-12.2 El mecánico asignado termina la orden 2 -> 200 TERMINADA, stock 2
+# @name caso12Terminar
+# @no-cookie-jar
+POST {{host}}/ordenes/{{orden2Id}}/terminar HTTP/1.1
+Cookie: {{loginMecanico.response.headers.Set-Cookie}}
+
+### C-12.3 Stock de BUJ-020 después del consumo -> 2
+# @name caso12StockFinal
+# @no-cookie-jar
+GET {{host}}/repuestos?q=buj&size=10 HTTP/1.1
+Cookie: {{loginAdmin.response.headers.Set-Cookie}}
+
+### C-12.4 Movimientos de BUJ-020 -> 3 (Stock inicial, Reposición, Consumo por orden)
+# @name caso12Movimientos
+# @no-cookie-jar
+GET {{host}}/repuestos/{{bujiaId}}/movimientos HTTP/1.1
+Cookie: {{loginAdmin.response.headers.Set-Cookie}}
+
+### C-12.5 Historial de la orden 2 -> 3 líneas (la última EN_REPARACION -> TERMINADA)
+# @name caso12Historial
+# @no-cookie-jar
+GET {{host}}/ordenes/{{orden2Id}} HTTP/1.1
+Cookie: {{loginAdmin.response.headers.Set-Cookie}}
+
+# El aviso simulado se imprime en el log del servidor DESPUÉS de la respuesta:
+#   AVISO orden 2 terminada: se notificó al cliente ...
+
+###############################################################################
+# C-13 - Cancelar
+# Esperado: el dueño cancela su orden pendiente (200); una orden ajena 403;
+#           una orden terminada 409.
+###############################################################################
+
+### C-13.1 Laura (dueña) cancela su orden 1 PENDIENTE -> 200 CANCELADA
+# @name caso13Dueno
+# @no-cookie-jar
+POST {{host}}/ordenes/{{orden1Id}}/cancelar HTTP/1.1
+Cookie: {{loginCliente.response.headers.Set-Cookie}}
+
+### C-13.2 Laura intenta cancelar la orden 2 (de Jorge) -> 403
+# @name caso13Ajena
+# @no-cookie-jar
+POST {{host}}/ordenes/{{orden2Id}}/cancelar HTTP/1.1
+Cookie: {{loginCliente.response.headers.Set-Cookie}}
+
+### C-13.3 El admin intenta cancelar la orden 2 TERMINADA -> 409
+# @name caso13Terminada
+# @no-cookie-jar
+POST {{host}}/ordenes/{{orden2Id}}/cancelar HTTP/1.1
+Cookie: {{loginAdmin.response.headers.Set-Cookie}}
+
+###############################################################################
+# C-14 - Tablas de sólo agregado y estado inexistente
+# Se ejecuta con psql, no con REST Client:
+#   $env:PGPASSWORD='...'
+#   & 'C:\Program Files\PostgreSQL\17\bin\psql.exe' -h localhost -U postgres `
+#       -d taller_db -f test/solo_agregado.sql
+#
+# Esperado: 7 rechazos.
+#   C-14.1 UPDATE historial_estado_orden      -> ERROR 23505 (disparador RN-15)
+#   C-14.2 DELETE historial_estado_orden      -> ERROR 23505
+#   C-14.3 UPDATE movimiento_stock            -> ERROR 23505
+#   C-14.4 DELETE movimiento_stock            -> ERROR 23505
+#   C-14.5 UPDATE historial_precio_repuesto   -> ERROR 23505
+#   C-14.6 DELETE historial_precio_repuesto   -> ERROR 23505
+#   C-14.7 INSERT orden_trabajo estado NO_EXISTE -> ERROR 23503 (FK estado_orden)
+# Cada bloque usa BEGIN; ... ROLLBACK; y no deja cambios.
+###############################################################################
+
+###############################################################################
+# C-15 - Detalle de una orden con 2 y con 4 ítems
+# Esperado: la misma cantidad de consultas SQL para ambos detalles.
+# Para contarlas, levantar el servidor con SQL_ECHO=true (o un listener
+# before_cursor_execute) y comparar el bloque de consultas de cada GET.
+###############################################################################
+
+### C-15.1 Crear una orden con 4 ítems distintos para el vehículo 3
+# Esperado: 201, 4 items y total 57500.00 (8500 + 32000 + 5000 + 12000)
+# @name crearOrdenCuatroItems
+# @no-cookie-jar
+POST {{host}}/ordenes HTTP/1.1
+Cookie: {{loginRecepcion.response.headers.Set-Cookie}}
+Content-Type: application/json
+
+{
+  "vehiculo_id": {{vehiculoJorge}},
+  "falla": "Service completo de 4 repuestos",
+  "items": [
+    { "repuesto_id": {{filtroId}}, "cantidad": 1 },
+    { "repuesto_id": {{frenoId}}, "cantidad": 1 },
+    { "repuesto_id": {{bujiaId}}, "cantidad": 1 },
+    { "repuesto_id": {{aceiteId}}, "cantidad": 1 }
+  ]
+}
+
+### C-15.2 Detalle de la orden con 2 ítems (la de C-10.1)
+# @name caso15DosItems
+# @no-cookie-jar
+GET {{host}}/ordenes/{{crearOrdenDosItems.response.body.$.id}} HTTP/1.1
+Cookie: {{loginAdmin.response.headers.Set-Cookie}}
+
+### C-15.3 Detalle de la orden con 4 ítems (la de C-15.1)
+# @name caso15CuatroItems
+# @no-cookie-jar
+GET {{host}}/ordenes/{{crearOrdenCuatroItems.response.body.$.id}} HTTP/1.1
+Cookie: {{loginAdmin.response.headers.Set-Cookie}}
+
+###############################################################################
+# C-16 - Búsqueda, paginación con filtro, PATCH parcial y PATCH del stock
+# Esperado: lista vacía con total 0; q=freno&size=1 -> total 1 y pages 1;
+#           page=2 -> 422; size=500 -> 422; PATCH parcial sólo cambia lo
+#           enviado; PATCH del stock -> 422.
+###############################################################################
+
+### C-16.1 Búsqueda con ' OR '1'='1 -> 200, items [] y total 0
+# @name caso16Inyeccion
+# @no-cookie-jar
+GET {{host}}/repuestos?q=%27%20OR%20%271%27%3D%271 HTTP/1.1
+Cookie: {{loginAdmin.response.headers.Set-Cookie}}
+
+### C-16.2 q=freno&size=1 -> total 1, page 1, pages 1
+# @name caso16Filtro
+# @no-cookie-jar
+GET {{host}}/repuestos?q=freno&size=1 HTTP/1.1
+Cookie: {{loginAdmin.response.headers.Set-Cookie}}
+
+### C-16.3 q=freno&size=1&page=2 -> 422 (la página 2 no existe)
+# @name caso16PaginaFuera
+# @no-cookie-jar
+GET {{host}}/repuestos?q=freno&size=1&page=2 HTTP/1.1
+Cookie: {{loginAdmin.response.headers.Set-Cookie}}
+
+### C-16.4 size=500 -> 422 (máximo 100)
+# @name caso16SizeInvalido
+# @no-cookie-jar
+GET {{host}}/repuestos?size=500 HTTP/1.1
+Cookie: {{loginAdmin.response.headers.Set-Cookie}}
+
+### C-16.5 PATCH parcial: sólo descripción de BUJ-020 -> 200, precio y stock intactos
+# @name caso16PatchParcial
+# @no-cookie-jar
+PATCH {{host}}/repuestos/{{bujiaId}} HTTP/1.1
+Cookie: {{loginAdmin.response.headers.Set-Cookie}}
+Content-Type: application/json
+
+{ "descripcion": "Bujía de encendido iridium" }
+
+### C-16.6 El PATCH parcial no tocó el precio (5000) ni el stock previo
+# @name caso16Verificacion
+# @no-cookie-jar
+GET {{host}}/repuestos?q=buj&size=10 HTTP/1.1
+Cookie: {{loginAdmin.response.headers.Set-Cookie}}
+
+### C-16.7 PATCH del stock -> 422 (stock no es campo editable)
+# @name caso16PatchStock
+# @no-cookie-jar
+PATCH {{host}}/repuestos/{{bujiaId}} HTTP/1.1
+Cookie: {{loginAdmin.response.headers.Set-Cookie}}
+Content-Type: application/json
+
+{ "stock": 99 }
+
+###############################################################################
+# C-17 - Catálogo de estados y filtro por estado no declarado
+# Esperado: los cuatro por posición, con TERMINADA y CANCELADA finales; sin
+#           sesión 401; estado no declarado 422.
+###############################################################################
+
+### C-17.1 Catálogo de estados -> 200 (PENDIENTE, EN_REPARACION, TERMINADA, CANCELADA)
+# @name caso17Catalogo
+# @no-cookie-jar
+GET {{host}}/estados-orden HTTP/1.1
+Cookie: {{loginAdmin.response.headers.Set-Cookie}}
+
+### C-17.2 Catálogo sin sesión -> 401
+# @name caso17SinSesion
+# @no-cookie-jar
+GET {{host}}/estados-orden HTTP/1.1
+
+### C-17.3 Filtrar órdenes por un estado no declarado -> 422
+# @name caso17EstadoInvalido
+# @no-cookie-jar
+GET {{host}}/ordenes?estado=NO_EXISTE HTTP/1.1
+Cookie: {{loginAdmin.response.headers.Set-Cookie}}
+
+###############################################################################
+# C-18 - Cambiar el precio de un repuesto y después sólo su descripción
+# Esperado: una línea nueva en /repuestos/1/precios (8500 -> 9000); el segundo
+#           PATCH no agrega ninguna; la recepción recibe 403.
+###############################################################################
+
+### C-18.1 PATCH del precio de FIL-001 a 9000 -> 200
+# @name caso18Precio
+# @no-cookie-jar
+PATCH {{host}}/repuestos/{{filtroId}} HTTP/1.1
+Cookie: {{loginAdmin.response.headers.Set-Cookie}}
+Content-Type: application/json
+
+{ "precio": 9000.00 }
+
+### C-18.2 Historial de precios -> 2 líneas: [9000<-8500, 8500<-8000]
+# @name caso18Historial1
+# @no-cookie-jar
+GET {{host}}/repuestos/{{filtroId}}/precios HTTP/1.1
+Cookie: {{loginAdmin.response.headers.Set-Cookie}}
+
+### C-18.3 PATCH sólo de la descripción -> 200, no agrega historial
+# @name caso18Descripcion
+# @no-cookie-jar
+PATCH {{host}}/repuestos/{{filtroId}} HTTP/1.1
+Cookie: {{loginAdmin.response.headers.Set-Cookie}}
+Content-Type: application/json
+
+{ "descripcion": "Filtro de aceite premium" }
+
+### C-18.4 El historial sigue con 2 líneas
+# @name caso18Historial2
+# @no-cookie-jar
+GET {{host}}/repuestos/{{filtroId}}/precios HTTP/1.1
+Cookie: {{loginAdmin.response.headers.Set-Cookie}}
+
+### C-18.5 La recepción intenta cambiar el precio -> 403 (sólo ADMIN)
+# @name caso18Recepcion
+# @no-cookie-jar
+PATCH {{host}}/repuestos/{{filtroId}} HTTP/1.1
+Cookie: {{loginRecepcion.response.headers.Set-Cookie}}
+Content-Type: application/json
+
+{ "precio": 9500.00 }
+
+###############################################################################
+# C-19 - Dar de baja un vehículo sin órdenes y registrarlo con la misma patente
+# Esperado: 204 y 201 (el índice único parcial sólo cuenta los vigentes); una
+#           segunda patente vigente igual -> 409.
+# El vehículo 1 quedó sin órdenes abiertas porque la orden 1 fue CANCELADA en
+# C-13 y el estado CANCELADA es final.
+###############################################################################
+
+### C-19.1 Baja lógica del vehículo 1 (AC456EF) -> 204
+# @name caso19Baja
+# @no-cookie-jar
+DELETE {{host}}/vehiculos/{{vehiculoLaura1}} HTTP/1.1
+Cookie: {{loginRecepcion.response.headers.Set-Cookie}}
+
+### C-19.2 Registrar AC456EF para Jorge -> 201 (nuevo vehículo 4)
+# @name caso19AltaMismaPatente
+# @no-cookie-jar
+POST {{host}}/clientes/{{jorgeId}}/vehiculos HTTP/1.1
+Cookie: {{loginRecepcion.response.headers.Set-Cookie}}
+Content-Type: application/json
+
+{
+  "patente": "AC456EF",
+  "marca": "Toyota",
+  "modelo": "Corolla",
+  "anio": 2020
+}
+
+### C-19.3 Registrar otra vez AC456EF para Laura -> 409 (ya hay uno vigente)
+# @name caso19Duplicado
+# @no-cookie-jar
+POST {{host}}/clientes/{{lauraId}}/vehiculos HTTP/1.1
+Cookie: {{loginRecepcion.response.headers.Set-Cookie}}
+Content-Type: application/json
+
+{
+  "patente": "AC456EF",
+  "marca": "Toyota",
+  "modelo": "Corolla",
+  "anio": 2020
+}
+
+###############################################################################
+# Fin de los casos C-01 a C-19.
+# Recordar volver a ejecutar `python seed.py` antes de la próxima corrida.
+###############################################################################

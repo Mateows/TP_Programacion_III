@@ -1,0 +1,50 @@
+# Entorno virtual
+.venv/
+venv/
+ENV/
+
+# Variables de entorno (secretos no versionados)
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.python-version
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# mypy
+.mypy_cache/
