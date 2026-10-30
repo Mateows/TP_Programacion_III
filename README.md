@@ -1,5 +1,10 @@
 # API Taller Mecánico
 
+**Grupo:** No hay Token que aguante  
+**Integrantes:** Mateo Liendo
+
+---
+
 API REST asincrónica para la gestión diaria de un taller mecánico: **clientes, vehículos, órdenes de trabajo y stock de repuestos**, con autenticación por cookie `HttpOnly` y autorización por roles decidida en la base de datos en cada petición.
 
 Es el trabajo práctico integrador de las unidades 1 a 6 de **Programación III** («del objeto a la transacción»). El alcance es el backend: no hay frontend propio; la web del taller sería un cliente externo que consume esta API.
